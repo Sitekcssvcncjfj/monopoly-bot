@@ -17,7 +17,7 @@ def init_db():
             chat_id INTEGER PRIMARY KEY,
             started INTEGER DEFAULT 0,
             turn_idx INTEGER DEFAULT 0,
-            state TEXT DEFAULT 'lobby',              -- lobby|turn|buy|auction|trade_pending|trade_setup
+            state TEXT DEFAULT 'lobby',
             pending_user INTEGER,
             pending_pos INTEGER,
             panel_message_id INTEGER,
@@ -73,14 +73,23 @@ def init_db():
             target_id INTEGER,
             offer_pos INTEGER,
             request_pos INTEGER,
-            cash_delta INTEGER DEFAULT 0,   -- proposer -> target (+) / target -> proposer (-)
+            cash_delta INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending',
             updated_at INTEGER DEFAULT 0
         )
         """)
-        conn.commit()
 
-# ---- game ----
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT,
+            games_played INTEGER DEFAULT 0,
+            games_won INTEGER DEFAULT 0,
+            money_earned INTEGER DEFAULT 0
+        )
+        """)
+
+        conn.commit()
 
 def create_game(chat_id: int):
     now = int(time.time())
@@ -150,8 +159,6 @@ def delete_game(chat_id: int):
         c.execute("DELETE FROM trades WHERE chat_id=?", (chat_id,))
         conn.commit()
 
-# ---- players ----
-
 def add_player(chat_id: int, user_id: int, name: str, start_money: int):
     with closing(db()) as conn:
         c = conn.cursor()
@@ -214,8 +221,6 @@ def update_player(chat_id: int, user_id: int, **kwargs):
         c.execute(f"UPDATE players SET {', '.join(keys)} WHERE chat_id=? AND user_id=?", vals)
         conn.commit()
 
-# ---- properties ----
-
 def get_properties(chat_id: int):
     with closing(db()) as conn:
         c = conn.cursor()
@@ -255,8 +260,6 @@ def delete_properties_of_player(chat_id: int, owner_id: int):
         c = conn.cursor()
         c.execute("DELETE FROM properties WHERE chat_id=? AND owner_id=?", (chat_id, owner_id))
         conn.commit()
-
-# ---- auction ----
 
 def start_auction(chat_id: int, pos: int, bidders: list[int]):
     now = int(time.time())
@@ -314,8 +317,6 @@ def clear_auction(chat_id: int):
         c.execute("DELETE FROM auctions WHERE chat_id=?", (chat_id,))
         conn.commit()
 
-# ---- trade ----
-
 def create_trade(chat_id: int, proposer_id: int, target_id: int, offer_pos: int, request_pos: int, cash_delta: int):
     now = int(time.time())
     with closing(db()) as conn:
@@ -353,3 +354,73 @@ def clear_trade(chat_id: int):
         c = conn.cursor()
         c.execute("DELETE FROM trades WHERE chat_id=?", (chat_id,))
         conn.commit()
+
+def ensure_stat_user(user_id: int, name: str):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM stats WHERE user_id=?", (user_id,))
+        if not c.fetchone():
+            c.execute("""
+                INSERT INTO stats(user_id, name, games_played, games_won, money_earned)
+                VALUES(?, ?, 0, 0, 0)
+            """, (user_id, name))
+        else:
+            c.execute("UPDATE stats SET name=? WHERE user_id=?", (name, user_id))
+        conn.commit()
+
+def add_games_played(user_id: int, name: str, amount: int = 1):
+    ensure_stat_user(user_id, name)
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE stats SET games_played = games_played + ? WHERE user_id=?", (amount, user_id))
+        conn.commit()
+
+def add_games_won(user_id: int, name: str, amount: int = 1):
+    ensure_stat_user(user_id, name)
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE stats SET games_won = games_won + ? WHERE user_id=?", (amount, user_id))
+        conn.commit()
+
+def add_money_earned(user_id: int, name: str, amount: int):
+    ensure_stat_user(user_id, name)
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE stats SET money_earned = money_earned + ? WHERE user_id=?", (amount, user_id))
+        conn.commit()
+
+def get_stat(user_id: int):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT user_id, name, games_played, games_won, money_earned
+            FROM stats WHERE user_id=?
+        """, (user_id,))
+        r = c.fetchone()
+        if not r:
+            return None
+        return {
+            "user_id": r[0],
+            "name": r[1],
+            "games_played": r[2],
+            "games_won": r[3],
+            "money_earned": r[4]
+        }
+
+def top_stats(limit: int = 10):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT user_id, name, games_played, games_won, money_earned
+            FROM stats
+            ORDER BY games_won DESC, money_earned DESC
+            LIMIT ?
+        """, (limit,))
+        rows = c.fetchall()
+        return [{
+            "user_id": r[0],
+            "name": r[1],
+            "games_played": r[2],
+            "games_won": r[3],
+            "money_earned": r[4]
+        } for r in rows]
