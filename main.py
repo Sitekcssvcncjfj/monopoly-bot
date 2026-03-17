@@ -1,970 +1,1387 @@
 import os
 import random
-import sqlite3
-from contextlib import closing
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ChatType
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import time
+from io import BytesIO
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+import config
+import db as DB
+from render_board import render_board_png
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = "monopoly.db"
 
-START_MONEY = 1500
-GO_BONUS = 200
-JAIL_POS = 9
 
-SUPPORT_URL = "https://t.me/KGBotomasyon"
-ADD_BOT_URL = "https://t.me/KGBMonopolyBOT?startgroup=true"
+# ----------------- Yardım Metni -----------------
 
-BOARD = [
-    {"name": "Başlangıç", "type": "start"},
-    {"name": "Kadıköy", "type": "property", "price": 100, "base_rent": 20, "color": "brown"},
-    {"name": "Kasa", "type": "community"},
-    {"name": "Beşiktaş", "type": "property", "price": 100, "base_rent": 20, "color": "brown"},
-    {"name": "Vergi", "type": "tax", "amount": 100},
-    {"name": "Üsküdar", "type": "property", "price": 140, "base_rent": 30, "color": "blue"},
-    {"name": "Şans", "type": "chance"},
-    {"name": "Taksim", "type": "property", "price": 140, "base_rent": 30, "color": "blue"},
-    {"name": "Şişli", "type": "property", "price": 160, "base_rent": 35, "color": "blue"},
-    {"name": "Hapis", "type": "jail"},
-    {"name": "Bakırköy", "type": "property", "price": 180, "base_rent": 40, "color": "pink"},
-    {"name": "Elektrik İdaresi", "type": "utility", "price": 150, "base_rent": 35, "color": "utility"},
-    {"name": "Bebek", "type": "property", "price": 180, "base_rent": 40, "color": "pink"},
-    {"name": "Kasa", "type": "community"},
-    {"name": "Levent", "type": "property", "price": 200, "base_rent": 45, "color": "pink"},
-    {"name": "Vapur İskelesi", "type": "railroad", "price": 200, "base_rent": 50, "color": "railroad"},
-    {"name": "Etiler", "type": "property", "price": 220, "base_rent": 50, "color": "orange"},
-    {"name": "Şans", "type": "chance"},
-    {"name": "Maslak", "type": "property", "price": 220, "base_rent": 50, "color": "orange"},
-    {"name": "Mecidiyeköy", "type": "property", "price": 240, "base_rent": 55, "color": "orange"},
-    {"name": "Ücretsiz Park", "type": "free"},
-    {"name": "Ataköy", "type": "property", "price": 260, "base_rent": 60, "color": "red"},
-    {"name": "Şans", "type": "chance"},
-    {"name": "Florya", "type": "property", "price": 260, "base_rent": 60, "color": "red"},
-    {"name": "Yeşilköy", "type": "property", "price": 280, "base_rent": 65, "color": "red"},
-    {"name": "Metrobüs", "type": "railroad", "price": 200, "base_rent": 50, "color": "railroad"},
-    {"name": "Kartal", "type": "property", "price": 300, "base_rent": 70, "color": "yellow"},
-    {"name": "Pendik", "type": "property", "price": 300, "base_rent": 70, "color": "yellow"},
-    {"name": "Su İdaresi", "type": "utility", "price": 150, "base_rent": 35, "color": "utility"},
-    {"name": "Tuzla", "type": "property", "price": 320, "base_rent": 75, "color": "yellow"},
-    {"name": "Hapise Git", "type": "goto_jail"},
-    {"name": "Beylikdüzü", "type": "property", "price": 340, "base_rent": 80, "color": "green"},
-    {"name": "Avcılar", "type": "property", "price": 340, "base_rent": 80, "color": "green"},
-    {"name": "Kasa", "type": "community"},
-    {"name": "Silivri", "type": "property", "price": 360, "base_rent": 85, "color": "green"},
-    {"name": "Lüks Vergisi", "type": "tax", "amount": 150},
-    {"name": "Şans", "type": "chance"},
-    {"name": "Boğaz", "type": "property", "price": 380, "base_rent": 90, "color": "darkblue"},
-    {"name": "Kasa", "type": "community"},
-    {"name": "Sarayburnu", "type": "property", "price": 400, "base_rent": 100, "color": "darkblue"},
-]
+HELP_TEXT = (
+    "<b>🎩 KGB Monopoly Bot - Oyun Rehberi</b>\n\n"
+    "<b>Temel:</b>\n"
+    "• Yeni Oyun: sıfırlar, lobby açar.\n"
+    "• Katıl: oyuna gir.\n"
+    "• Başlat: 2+ kişiyle oyunu başlatır.\n"
+    "• Zar At: sadece sırası gelen oyuncu oynar.\n\n"
+    "<b>Satın Alma:</b>\n"
+    "• Boş mülke gelince Satın Al / Açık Artırma / Geç.\n\n"
+    "<b>Açık Artırma:</b>\n"
+    "• Sırayla teklif verilir.\n"
+    "• Pas geçen açık artırmadan çıkar.\n\n"
+    "<b>Ev/Otel:</b>\n"
+    "• Renk setini tamamlamadan ev kurulamaz.\n"
+    "• 4 ev → otel.\n\n"
+    "<b>İpotek:</b>\n"
+    "• Bina/otel yoksa ipotek yapılır.\n    "
+    "• İpotekli mülk kira üretmez.\n"
+    "• Devredilirse yeni sahip %10 faiz öder.\n\n"
+    "<b>Takas:</b>\n"
+    "• Sadece sıradaki oyuncu, zar atmadan önce takas önerebilir.\n"
+    "• Teklif kabul/ret.\n\n"
+    "<b>Zaman Aşımı:</b>\n"
+    f"• Sıradaki oyuncu {config.TURN_TIMEOUT_SEC}s içinde oynamazsa bot otomatik zar atar.\n"
+)
 
-COLOR_GROUPS = {
-    "brown": [1, 3],
-    "blue": [5, 7, 8],
-    "pink": [10, 12, 14],
-    "orange": [16, 18, 19],
-    "red": [21, 23, 24],
-    "yellow": [26, 27, 29],
-    "green": [31, 32, 34],
-    "darkblue": [37, 39],
-}
 
-CHANCE_CARDS = [
-    ("Piyango kazandın", 150),
-    ("Araban bozuldu", -100),
-    ("Maaş primi aldın", 120),
-    ("Cüzdanını düşürdün", -80),
-]
+# ----------------- UI -----------------
 
-COMMUNITY_CARDS = [
-    ("Miras kaldı", 100),
-    ("Fatura ödedin", -70),
-    ("Doğum günü hediyesi aldın", 80),
-    ("Borsa kazancı", 130),
-]
+def kb_lobby():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎮 Yeni Oyun", callback_data="ng"),
+         InlineKeyboardButton("➕ Katıl", callback_data="jn")],
+        [InlineKeyboardButton("▶️ Başlat", callback_data="st"),
+         InlineKeyboardButton("📊 Durum", callback_data="ss")],
+        [InlineKeyboardButton("🆘 Destek", url=config.SUPPORT_URL),
+         InlineKeyboardButton("➕ Beni Gruba Ekle", url=config.ADD_BOT_URL)],
+        [InlineKeyboardButton("📖 Help", callback_data="hp"),
+         InlineKeyboardButton("🛑 Bitir", callback_data="en")],
+    ])
 
-def db():
-    return sqlite3.connect(DB_PATH)
+def kb_turn():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 Zar At", callback_data="rl"),
+         InlineKeyboardButton("📊 Durum", callback_data="ss")],
+        [InlineKeyboardButton("🏠 Mülklerim", callback_data="mp"),
+         InlineKeyboardButton("👥 Oyuncular", callback_data="pl")],
+        [InlineKeyboardButton("🧱 İnşa", callback_data="bd"),
+         InlineKeyboardButton("🏦 İpotek", callback_data="mg")],
+        [InlineKeyboardButton("🤝 Takas", callback_data="tr"),
+         InlineKeyboardButton("📖 Help", callback_data="hp")],
+        [InlineKeyboardButton("🆘 Destek", url=config.SUPPORT_URL),
+         InlineKeyboardButton("➕ Gruba Ekle", url=config.ADD_BOT_URL)],
+        [InlineKeyboardButton("🛑 Bitir", callback_data="en")],
+    ])
 
-def init_db():
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS games (
-                chat_id INTEGER PRIMARY KEY,
-                started INTEGER DEFAULT 0,
-                turn INTEGER DEFAULT 0,
-                waiting_buy_user INTEGER,
-                waiting_buy_pos INTEGER,
-                auction_pos INTEGER,
-                auction_turn_user INTEGER,
-                auction_highest_bid INTEGER DEFAULT 0,
-                auction_highest_user INTEGER
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS players (
-                chat_id INTEGER,
-                user_id INTEGER,
-                name TEXT,
-                money INTEGER,
-                position INTEGER,
-                alive INTEGER,
-                in_jail INTEGER,
-                jail_turns INTEGER,
-                doubles_count INTEGER,
-                PRIMARY KEY (chat_id, user_id)
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS properties (
-                chat_id INTEGER,
-                position INTEGER,
-                owner_id INTEGER,
-                houses INTEGER DEFAULT 0,
-                hotel INTEGER DEFAULT 0,
-                mortgaged INTEGER DEFAULT 0,
-                PRIMARY KEY (chat_id, position)
-            )
-        """)
-        conn.commit()
+def kb_buy(pos: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Satın Al", callback_data=f"buy:{pos}")],
+        [InlineKeyboardButton("📢 Açık Artırma", callback_data=f"auc:{pos}")],
+        [InlineKeyboardButton("❌ Geç", callback_data=f"pas:{pos}")],
+        [InlineKeyboardButton("📊 Durum", callback_data="ss"),
+         InlineKeyboardButton("📖 Help", callback_data="hp")]
+    ])
 
-def create_game(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM games WHERE chat_id = ?", (chat_id,))
-        c.execute("DELETE FROM players WHERE chat_id = ?", (chat_id,))
-        c.execute("DELETE FROM properties WHERE chat_id = ?", (chat_id,))
-        c.execute("""
-            INSERT INTO games (
-                chat_id, started, turn, waiting_buy_user, waiting_buy_pos,
-                auction_pos, auction_turn_user, auction_highest_bid, auction_highest_user
-            ) VALUES (?, 0, 0, NULL, NULL, NULL, NULL, 0, NULL)
-        """, (chat_id,))
-        conn.commit()
+def kb_auction(can_act: bool, pos: int):
+    if can_act:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("💸 +10", callback_data="ab:10"),
+             InlineKeyboardButton("💸 +50", callback_data="ab:50"),
+             InlineKeyboardButton("💸 +100", callback_data="ab:100")],
+            [InlineKeyboardButton("⛔ Pas", callback_data="ap")],
+            [InlineKeyboardButton("📊 Durum", callback_data="ss"),
+             InlineKeyboardButton("📖 Help", callback_data="hp")]
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏳ Açık artırma sürüyor...", callback_data="noop")],
+        [InlineKeyboardButton("📊 Durum", callback_data="ss"),
+         InlineKeyboardButton("📖 Help", callback_data="hp")]
+    ])
 
-def game_exists(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM games WHERE chat_id = ?", (chat_id,))
-        return c.fetchone() is not None
+def kb_trade_pick(chat_id: int, proposer_id: int):
+    players = [p for p in DB.get_players(chat_id) if p["alive"] and p["user_id"] != proposer_id]
+    rows = []
+    for p in players[:10]:
+        rows.append([InlineKeyboardButton(f"🤝 {p['name']}", callback_data=f"trt:{p['user_id']}")])
+    rows.append([InlineKeyboardButton("⬅️ İptal", callback_data="tr_cancel")])
+    return InlineKeyboardMarkup(rows)
 
-def get_game(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("""
-            SELECT chat_id, started, turn, waiting_buy_user, waiting_buy_pos,
-                   auction_pos, auction_turn_user, auction_highest_bid, auction_highest_user
-            FROM games WHERE chat_id = ?
-        """, (chat_id,))
-        row = c.fetchone()
-        if not row:
-            return None
-        return {
-            "chat_id": row[0],
-            "started": bool(row[1]),
-            "turn": row[2],
-            "waiting_buy_user": row[3],
-            "waiting_buy_pos": row[4],
-            "auction_pos": row[5],
-            "auction_turn_user": row[6],
-            "auction_highest_bid": row[7],
-            "auction_highest_user": row[8],
-        }
+def kb_trade_choose_props(chat_id: int, proposer_id: int, target_id: int, step: str, selected_offer=None, selected_req=None, cash_delta=0):
+    props = DB.get_properties(chat_id)
+    my_props = [pos for pos, inf in props.items() if inf["owner_id"] == proposer_id]
+    tg_props = [pos for pos, inf in props.items() if inf["owner_id"] == target_id]
 
-def update_game(chat_id, **kwargs):
-    if not kwargs:
-        return
-    keys = []
-    values = []
-    for k, v in kwargs.items():
-        keys.append(f"{k} = ?")
-        values.append(v)
-    values.append(chat_id)
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute(f"UPDATE games SET {', '.join(keys)} WHERE chat_id = ?", values)
-        conn.commit()
+    rows = []
+    if step == "offer":
+        rows.append([InlineKeyboardButton("📌 Vereceğin mülkü seç", callback_data="noop")])
+        for pos in my_props[:12]:
+            rows.append([InlineKeyboardButton(f"➡️ {config.BOARD[pos]['name']}", callback_data=f"tro:{pos}")])
+    else:
+        rows.append([InlineKeyboardButton("📌 İstediğin mülkü seç", callback_data="noop")])
+        for pos in tg_props[:12]:
+            rows.append([InlineKeyboardButton(f"⬅️ {config.BOARD[pos]['name']}", callback_data=f"trr:{pos}")])
 
-def add_player(chat_id, user_id, name):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM players WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
-        if c.fetchone():
-            return False
-        c.execute("""
-            INSERT INTO players (chat_id, user_id, name, money, position, alive, in_jail, jail_turns, doubles_count)
-            VALUES (?, ?, ?, ?, 0, 1, 0, 0, 0)
-        """, (chat_id, user_id, name, START_MONEY))
-        conn.commit()
-        return True
+    # para farkı ayarı (teklif ekranında)
+    if selected_offer is not None and selected_req is not None:
+        rows.append([
+            InlineKeyboardButton("💰 -50", callback_data="trc:-50"),
+            InlineKeyboardButton("💰 +50", callback_data="trc:+50"),
+        ])
+        rows.append([
+            InlineKeyboardButton("💰 -10", callback_data="trc:-10"),
+            InlineKeyboardButton("💰 +10", callback_data="trc:+10"),
+        ])
+        rows.append([InlineKeyboardButton(f"✅ Teklifi Gönder (Δ={cash_delta}$)", callback_data="tr_send")])
 
-def get_players(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("""
-            SELECT user_id, name, money, position, alive, in_jail, jail_turns, doubles_count
-            FROM players WHERE chat_id = ?
-            ORDER BY rowid
-        """, (chat_id,))
-        rows = c.fetchall()
-        return [{
-            "user_id": r[0],
-            "name": r[1],
-            "money": r[2],
-            "position": r[3],
-            "alive": bool(r[4]),
-            "in_jail": bool(r[5]),
-            "jail_turns": r[6],
-            "doubles_count": r[7],
-        } for r in rows]
+    rows.append([InlineKeyboardButton("⬅️ İptal", callback_data="tr_cancel")])
+    return InlineKeyboardMarkup(rows)
 
-def update_player(chat_id, user_id, **kwargs):
-    if not kwargs:
-        return
-    keys = []
-    values = []
-    for k, v in kwargs.items():
-        keys.append(f"{k} = ?")
-        values.append(v)
-    values.extend([chat_id, user_id])
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute(f"UPDATE players SET {', '.join(keys)} WHERE chat_id = ? AND user_id = ?", values)
-        conn.commit()
+def kb_trade_pending(can_answer: bool):
+    if can_answer:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Kabul", callback_data="tr_yes"),
+             InlineKeyboardButton("❌ Reddet", callback_data="tr_no")],
+            [InlineKeyboardButton("📊 Durum", callback_data="ss"),
+             InlineKeyboardButton("📖 Help", callback_data="hp")]
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏳ Takas yanıt bekliyor...", callback_data="noop")],
+        [InlineKeyboardButton("📊 Durum", callback_data="ss"),
+         InlineKeyboardButton("📖 Help", callback_data="hp")]
+    ])
 
-def get_properties(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT position, owner_id, houses, hotel, mortgaged FROM properties WHERE chat_id = ?", (chat_id,))
-        rows = c.fetchall()
-        return {
-            r[0]: {
-                "owner_id": r[1],
-                "houses": r[2],
-                "hotel": r[3],
-                "mortgaged": r[4],
-            } for r in rows
-        }
+def kb_build_menu(chat_id: int, user_id: int):
+    props = DB.get_properties(chat_id)
+    my_buildables = []
+    for pos, inf in props.items():
+        if inf["owner_id"] == user_id and config.BOARD[pos]["type"] == "property":
+            my_buildables.append(pos)
+    rows = [[InlineKeyboardButton("🧱 İnşa edilecek mülk seç", callback_data="noop")]]
+    for pos in my_buildables[:12]:
+        rows.append([InlineKeyboardButton(f"🏗️ {config.BOARD[pos]['name']}", callback_data=f"bdp:{pos}")])
+    rows.append([InlineKeyboardButton("⬅️ Geri", callback_data="back_turn")])
+    return InlineKeyboardMarkup(rows)
 
-def set_property_owner(chat_id, position, owner_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO properties (chat_id, position, owner_id, houses, hotel, mortgaged)
-            VALUES (?, ?, ?, 0, 0, 0)
-            ON CONFLICT(chat_id, position) DO UPDATE SET owner_id=excluded.owner_id
-        """, (chat_id, position, owner_id))
-        conn.commit()
+def kb_build_actions(pos: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Ev Kur", callback_data=f"bh:{pos}"),
+         InlineKeyboardButton("🏨 Otel Kur", callback_data=f"bt:{pos}")],
+        [InlineKeyboardButton("⬅️ Geri", callback_data="bd")]
+    ])
 
-def update_property(chat_id, position, **kwargs):
-    if not kwargs:
-        return
-    keys = []
-    values = []
-    for k, v in kwargs.items():
-        keys.append(f"{k} = ?")
-        values.append(v)
-    values.extend([chat_id, position])
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute(f"UPDATE properties SET {', '.join(keys)} WHERE chat_id = ? AND position = ?", values)
-        conn.commit()
+def kb_mortgage_menu(chat_id: int, user_id: int):
+    props = DB.get_properties(chat_id)
+    rows = [[InlineKeyboardButton("🏦 İpotek yapılacak/çözülecek mülk", callback_data="noop")]]
+    for pos, inf in props.items():
+        if inf["owner_id"] == user_id:
+            state = "🔒" if inf["mortgaged"] else "💰"
+            rows.append([InlineKeyboardButton(f"{state} {config.BOARD[pos]['name']}", callback_data=f"mo:{pos}")])
+    rows.append([InlineKeyboardButton("⬅️ Geri", callback_data="back_turn")])
+    return InlineKeyboardMarkup(rows)
 
-def delete_properties_of_player(chat_id, owner_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM properties WHERE chat_id = ? AND owner_id = ?", (chat_id, owner_id))
-        conn.commit()
 
-def delete_game(chat_id):
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM games WHERE chat_id = ?", (chat_id,))
-        c.execute("DELETE FROM players WHERE chat_id = ?", (chat_id,))
-        c.execute("DELETE FROM properties WHERE chat_id = ?", (chat_id,))
-        conn.commit()
+# ----------------- Oyun Mantığı -----------------
 
-def get_current_player(chat_id):
-    game = get_game(chat_id)
-    players = get_players(chat_id)
+def owner_name(chat_id: int, owner_id: int):
+    p = DB.get_player(chat_id, owner_id)
+    return p["name"] if p else "Bilinmiyor"
+
+def get_current_player(chat_id: int):
+    game = DB.get_game(chat_id)
+    players = DB.get_players(chat_id)
     if not game or not players:
         return None
-    turn = game["turn"]
-    if turn >= len(players):
-        update_game(chat_id, turn=0)
+    idx = game["turn_idx"]
+    if idx >= len(players):
+        DB.update_game(chat_id, turn_idx=0)
         return players[0]
-    return players[turn]
+    return players[idx]
 
-def next_turn(chat_id):
-    game = get_game(chat_id)
-    players = get_players(chat_id)
-    alive_indices = [i for i, p in enumerate(players) if p["alive"]]
-    if len(alive_indices) <= 1:
+def next_turn(chat_id: int):
+    game = DB.get_game(chat_id)
+    players = DB.get_players(chat_id)
+    alive_idxs = [i for i, p in enumerate(players) if p["alive"]]
+    if len(alive_idxs) <= 1:
         return None
-    turn = game["turn"]
+    idx = game["turn_idx"]
     while True:
-        turn = (turn + 1) % len(players)
-        if players[turn]["alive"]:
-            update_game(chat_id, turn=turn)
-            return players[turn]
+        idx = (idx + 1) % len(players)
+        if players[idx]["alive"]:
+            DB.update_game(chat_id, turn_idx=idx)
+            return players[idx]
 
-def owner_name(chat_id, owner_id):
-    player = next((p for p in get_players(chat_id) if p["user_id"] == owner_id), None)
-    return player["name"] if player else "Bilinmiyor"
-
-def owns_full_set(chat_id, user_id, color):
-    if color not in COLOR_GROUPS:
+def owns_full_set(chat_id: int, user_id: int, color: str):
+    if color not in config.COLOR_GROUPS:
         return False
-    props = get_properties(chat_id)
-    for pos in COLOR_GROUPS[color]:
+    props = DB.get_properties(chat_id)
+    for pos in config.COLOR_GROUPS[color]:
         if pos not in props or props[pos]["owner_id"] != user_id:
             return False
     return True
 
-def calculate_rent(chat_id, position):
-    tile = BOARD[position]
-    props = get_properties(chat_id)
-    if position not in props:
-        return tile.get("base_rent", 0)
-
-    prop = props[position]
-    if prop["mortgaged"]:
-        return 0
-
+def calc_rent(chat_id: int, pos: int):
+    tile = config.BOARD[pos]
+    props = DB.get_properties(chat_id)
+    p = props.get(pos)
     base = tile.get("base_rent", 0)
-    if prop["hotel"]:
+    if not p:
+        return base
+    if p["mortgaged"]:
+        return 0
+    if p["hotel"]:
         return base * 6
-    if prop["houses"] > 0:
-        return base * (prop["houses"] + 1)
-
-    if tile["type"] == "property" and owns_full_set(chat_id, prop["owner_id"], tile["color"]):
+    if p["houses"] > 0:
+        return base * (p["houses"] + 1)
+    if tile["type"] == "property" and owns_full_set(chat_id, p["owner_id"], tile["color"]):
         return base * 2
-
     return base
 
-def can_build_house(chat_id, user_id, position):
-    tile = BOARD[position]
-    props = get_properties(chat_id)
-    prop = props.get(position)
+def mortgage_value(pos: int):
+    return config.BOARD[pos].get("price", 0) // 2
+
+def mortgage_interest(pos: int):
+    mv = mortgage_value(pos)
+    return max(1, int(mv * 0.10))
+
+def apply_money(chat_id: int, user_id: int, delta: int):
+    pl = DB.get_player(chat_id, user_id)
+    if not pl:
+        return None, None
+    new_money = pl["money"] + delta
+    if new_money < 0:
+        DB.update_player(chat_id, user_id, money=new_money, alive=0)
+        DB.delete_properties_of_player(chat_id, user_id)
+        return new_money, f"💀 {pl['name']} iflas etti!"
+    DB.update_player(chat_id, user_id, money=new_money)
+    return new_money, None
+
+def check_winner(chat_id: int):
+    alive = [p for p in DB.get_players(chat_id) if p["alive"]]
+    if len(alive) == 1:
+        return alive[0]
+    return None
+
+
+# ----------------- Panel (tek mesaj) -----------------
+
+async def ensure_panel_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game:
+        return None
+    if game["panel_message_id"]:
+        return game["panel_message_id"]
+
+    # yeni panel oluştur
+    players = DB.get_players(chat_id)
+    png = render_board_png(config.BOARD, players)
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=png,
+        caption="🎮 Panel hazırlanıyor...",
+        parse_mode="HTML"
+    )
+    DB.update_game(chat_id, panel_message_id=msg.message_id)
+    return msg.message_id
+
+def panel_keyboard(chat_id: int, viewer_id: int | None = None):
+    game = DB.get_game(chat_id)
+    if not game:
+        return kb_lobby()
+    if not game["started"]:
+        return kb_lobby()
+
+    st = game["state"]
+    if st == "buy":
+        return kb_buy(game["pending_pos"])
+    if st == "auction":
+        auc = DB.get_auction(chat_id)
+        cur_uid = auc["bidders"][auc["current_idx"]] if auc else None
+        can_act = (viewer_id is not None and viewer_id == cur_uid)
+        return kb_auction(can_act=can_act, pos=auc["pos"] if auc else 0)
+    if st == "trade_pending":
+        tr = DB.get_trade(chat_id)
+        can_answer = (viewer_id is not None and tr and viewer_id == tr["target_id"])
+        return kb_trade_pending(can_answer)
+    # normal turn
+    return kb_turn()
+
+def build_caption(chat_id: int):
+    game = DB.get_game(chat_id)
+    players = DB.get_players(chat_id)
+    if not game:
+        return "🎩 <b>KGB Monopoly</b>\nPanel yok. /start ile aç."
+
+    if not players:
+        return (
+            "🎩 <b>KGB Monopoly</b>\n\n"
+            "Oyuncu yok. ➕ Katıl ile oyuna girin."
+        )
+
+    cur = get_current_player(chat_id)
+    state = game["state"]
+    last = game["last_action"] or ""
+
+    text = "🎩 <b>KGB Monopoly</b>\n"
+    text += f"🟢 Durum: <b>{'Başladı' if game['started'] else 'Lobby'}</b>\n"
+
+    if game["started"] and cur:
+        tile = config.BOARD[cur["position"]]["name"]
+        text += f"➡️ Sıra: <b>{cur['name']}</b> | 💰 ${cur['money']} | 📍 {tile}\n"
+
+    if state == "buy":
+        pos = game["pending_pos"]
+        t = config.BOARD[pos]
+        text += f"\n🏠 <b>{t['name']}</b> boş. Fiyat: <b>${t['price']}</b>\n"
+        text += "Satın al / açık artırma / geç."
+    elif state == "auction":
+        auc = DB.get_auction(chat_id)
+        if auc:
+            cur_uid = auc["bidders"][auc["current_idx"]]
+            curp = DB.get_player(chat_id, cur_uid)
+            text += (
+                f"\n📢 <b>Açık Artırma</b> | Mülk: <b>{config.BOARD[auc['pos']]['name']}</b>\n"
+                f"🏷️ En yüksek: <b>${auc['highest_bid']}</b> ({owner_name(chat_id, auc['highest_user']) if auc['highest_user'] else 'yok'})\n"
+                f"👉 Sıra: <b>{curp['name'] if curp else cur_uid}</b>\n"
+            )
+    elif state == "trade_pending":
+        tr = DB.get_trade(chat_id)
+        if tr:
+            proposer = DB.get_player(chat_id, tr["proposer_id"])
+            target = DB.get_player(chat_id, tr["target_id"])
+            text += "\n🤝 <b>Takas Teklifi</b>\n"
+            text += f"• {proposer['name'] if proposer else tr['proposer_id']} ↔ {target['name'] if target else tr['target_id']}\n"
+            text += f"• Verilen: <b>{config.BOARD[tr['offer_pos']]['name']}</b>\n"
+            text += f"• İstenen: <b>{config.BOARD[tr['request_pos']]['name']}</b>\n"
+            if tr["cash_delta"] != 0:
+                if tr["cash_delta"] > 0:
+                    text += f"• Para farkı: Proposer → Target <b>${tr['cash_delta']}</b>\n"
+                else:
+                    text += f"• Para farkı: Target → Proposer <b>${abs(tr['cash_delta'])}</b>\n"
+            text += "\nHedef oyuncu kabul/ret verebilir."
+    else:
+        pass
+
+    if last:
+        text += f"\n\n📝 <i>{last}</i>"
+
+    # caption limitini çok aşmayalım
+    return text[:950]
+
+async def update_panel(chat_id: int, context: ContextTypes.DEFAULT_TYPE, viewer_id: int | None = None, force_new_image: bool = True):
+    game = DB.get_game(chat_id)
+    if not game:
+        return
+
+    mid = await ensure_panel_message(chat_id, context)
+    caption = build_caption(chat_id)
+    keyboard = panel_keyboard(chat_id, viewer_id=viewer_id)
+
+    # her aksiyonda board görselini güncelle (tek mesaj canlı panel + gerçek tahta)
+    players = DB.get_players(chat_id)
+    png = render_board_png(config.BOARD, players)
+
+    try:
+        media = InputMediaPhoto(media=png, caption=caption, parse_mode="HTML")
+        await context.bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=mid,
+            media=media,
+            reply_markup=keyboard
+        )
+    except Exception:
+        # media edit olmazsa caption edit dene
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=mid,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+        except Exception:
+            # panel silindiyse yeniden oluştur
+            DB.update_game(chat_id, panel_message_id=None)
+            await ensure_panel_message(chat_id, context)
+
+
+# ----------------- Timeout Jobs -----------------
+
+def schedule_turn_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    job_name = f"turn_timeout:{chat_id}"
+    # eski job'u kaldır
+    for j in context.job_queue.get_jobs_by_name(job_name):
+        j.schedule_removal()
+
+    context.job_queue.run_once(turn_timeout_job, when=config.TURN_TIMEOUT_SEC, data={"chat_id": chat_id}, name=job_name)
+
+async def turn_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data["chat_id"]
+    game = DB.get_game(chat_id)
+    if not game or not game["started"]:
+        return
+    if game["state"] != "turn":
+        return
+    cur = get_current_player(chat_id)
+    if not cur or not cur["alive"]:
+        return
+
+    DB.update_game(chat_id, last_action=f"⏰ Zaman aşımı! {cur['name']} için bot otomatik zar attı.")
+    await do_roll(chat_id, cur["user_id"], context, auto=True)
+
+def schedule_auction_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    job_name = f"auction_timeout:{chat_id}"
+    for j in context.job_queue.get_jobs_by_name(job_name):
+        j.schedule_removal()
+    context.job_queue.run_once(auction_timeout_job, when=config.AUCTION_TIMEOUT_SEC, data={"chat_id": chat_id}, name=job_name)
+
+async def auction_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data["chat_id"]
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "auction":
+        return
+    auc = DB.get_auction(chat_id)
+    if not auc:
+        return
+    cur_uid = auc["bidders"][auc["current_idx"]]
+    cur = DB.get_player(chat_id, cur_uid)
+    DB.update_game(chat_id, last_action=f"⏰ Açık artırma zaman aşımı: {cur['name'] if cur else cur_uid} otomatik PAS.")
+    await auction_pass(chat_id, cur_uid, context)
+
+def schedule_trade_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    job_name = f"trade_timeout:{chat_id}"
+    for j in context.job_queue.get_jobs_by_name(job_name):
+        j.schedule_removal()
+    context.job_queue.run_once(trade_timeout_job, when=config.TRADE_TIMEOUT_SEC, data={"chat_id": chat_id}, name=job_name)
+
+async def trade_timeout_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data["chat_id"]
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "trade_pending":
+        return
+    DB.update_game(chat_id, last_action="⏰ Takas yanıtı gelmedi, otomatik reddedildi.")
+    DB.clear_trade(chat_id)
+    DB.update_game(chat_id, state="turn")
+    schedule_turn_timeout(chat_id, context)
+    await update_panel(chat_id, context)
+
+
+# ----------------- Oyun Aksiyonları -----------------
+
+async def start_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    players = DB.get_players(chat_id)
+    if len(players) < 2:
+        DB.update_game(chat_id, last_action="En az 2 oyuncu gerekli.")
+        return
+    DB.update_game(chat_id, started=1, turn_idx=0, state="turn", last_action="Oyun başladı!")
+    schedule_turn_timeout(chat_id, context)
+
+async def do_roll(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, auto: bool = False):
+    game = DB.get_game(chat_id)
+    if not game or not game["started"]:
+        return
+
+    if game["state"] != "turn":
+        return
+
+    cur = get_current_player(chat_id)
+    if not cur or cur["user_id"] != user_id:
+        return
+
+    # hapis basit: 2 tur bekle
+    if cur["in_jail"]:
+        jt = cur["jail_turns"] + 1
+        if jt >= 2:
+            DB.update_player(chat_id, user_id, in_jail=0, jail_turns=0)
+            jail_msg = "🔓 Hapisten çıktın."
+        else:
+            DB.update_player(chat_id, user_id, jail_turns=jt)
+            nxt = next_turn(chat_id)
+            DB.update_game(chat_id, last_action=f"🚔 {cur['name']} hapiste, tur atladı. Sıra: {nxt['name']}")
+            schedule_turn_timeout(chat_id, context)
+            await update_panel(chat_id, context)
+            return
+    else:
+        jail_msg = ""
+
+    d1 = random.randint(1, 6)
+    d2 = random.randint(1, 6)
+    total = d1 + d2
+    is_double = (d1 == d2)
+    doubles_count = cur["doubles_count"] + 1 if is_double else 0
+
+    if doubles_count >= 3:
+        DB.update_player(chat_id, user_id, position=config.JAIL_POS, in_jail=1, jail_turns=0, doubles_count=0)
+        nxt = next_turn(chat_id)
+        DB.update_game(chat_id, last_action=f"🎲 {cur['name']} {d1}+{d2} attı. 3 çift zar → 🚓 Hapis! Sıra: {nxt['name']}", state="turn")
+        schedule_turn_timeout(chat_id, context)
+        await update_panel(chat_id, context)
+        return
+
+    old_pos = cur["position"]
+    new_pos = (old_pos + total) % len(config.BOARD)
+
+    money = cur["money"]
+    passed_go = new_pos < old_pos
+    if passed_go:
+        money += config.GO_BONUS
+
+    DB.update_player(chat_id, user_id, position=new_pos, money=money, doubles_count=doubles_count)
+
+    tile = config.BOARD[new_pos]
+    msg = f"{'🤖 ' if auto else ''}{jail_msg} 🎲 {cur['name']} zar: {d1}+{d2}={total}. "
+    if passed_go:
+        msg += f"🏁 +${config.GO_BONUS}. "
+    msg += f"📍 {tile['name']}."
+
+    # kare etkisi
+    if tile["type"] in ("property", "railroad", "utility"):
+        props = DB.get_properties(chat_id)
+        info = props.get(new_pos)
+        if info is None:
+            # satın alma fazı
+            DB.update_game(chat_id, state="buy", pending_user=user_id, pending_pos=new_pos, last_action=msg)
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        if info["owner_id"] == user_id:
+            DB.update_game(chat_id, last_action=msg + " 🏡 Kendi mülkün.")
+        else:
+            rent = calc_rent(chat_id, new_pos)
+            if rent <= 0:
+                DB.update_game(chat_id, last_action=msg + " 🔒 İpotekli mülk, kira yok.")
+            else:
+                _, bmsg = apply_money(chat_id, user_id, -rent)
+                if info["owner_id"]:
+                    apply_money(chat_id, info["owner_id"], rent)
+                DB.update_game(chat_id, last_action=msg + f" 💰 {owner_name(chat_id, info['owner_id'])}’a ${rent} kira ödendi." + (f" {bmsg}" if bmsg else ""))
+    elif tile["type"] == "tax":
+        _, bmsg = apply_money(chat_id, user_id, -tile["amount"])
+        DB.update_game(chat_id, last_action=msg + f" 🧾 -${tile['amount']} vergi." + (f" {bmsg}" if bmsg else ""))
+    elif tile["type"] == "chance":
+        text, delta = random.choice(config.CHANCE_CARDS)
+        _, bmsg = apply_money(chat_id, user_id, delta)
+        sign = "+" if delta >= 0 else "-"
+        DB.update_game(chat_id, last_action=msg + f" 🎴 Şans: {text} ({sign}${abs(delta)})." + (f" {bmsg}" if bmsg else ""))
+    elif tile["type"] == "community":
+        text, delta = random.choice(config.COMMUNITY_CARDS)
+        _, bmsg = apply_money(chat_id, user_id, delta)
+        sign = "+" if delta >= 0 else "-"
+        DB.update_game(chat_id, last_action=msg + f" 📦 Kasa: {text} ({sign}${abs(delta)})." + (f" {bmsg}" if bmsg else ""))
+    elif tile["type"] == "goto_jail":
+        DB.update_player(chat_id, user_id, position=config.JAIL_POS, in_jail=1, jail_turns=0, doubles_count=0)
+        DB.update_game(chat_id, last_action=msg + " 🚓 Hapise gönderildin!")
+    else:
+        DB.update_game(chat_id, last_action=msg)
+
+    # kazanan?
+    winner = check_winner(chat_id)
+    if winner:
+        DB.update_game(chat_id, last_action=f"🏆 Oyun bitti! Kazanan: {winner['name']}")
+        DB.delete_game(chat_id)
+        await context.bot.send_message(chat_id, f"🏆 Oyun bitti! Kazanan: {winner['name']}")
+        return
+
+    if is_double and DB.get_player(chat_id, user_id)["alive"]:
+        DB.update_game(chat_id, state="turn", last_action=DB.get_game(chat_id)["last_action"] + " ✨ Çift zar! Tekrar oynayabilirsin.")
+        schedule_turn_timeout(chat_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
+
+    nxt = next_turn(chat_id)
+    DB.update_game(chat_id, state="turn", last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+    schedule_turn_timeout(chat_id, context)
+    await update_panel(chat_id, context)
+
+
+async def buy_property(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "buy" or game["pending_user"] != user_id:
+        return
+    pos = game["pending_pos"]
+    tile = config.BOARD[pos]
+    player = DB.get_player(chat_id, user_id)
+    if player["money"] < tile["price"]:
+        DB.update_game(chat_id, last_action="💸 Yetersiz para, satın alma iptal.", state="turn", pending_user=None, pending_pos=None)
+        nxt = next_turn(chat_id)
+        DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+        schedule_turn_timeout(chat_id, context)
+        await update_panel(chat_id, context)
+        return
+    DB.update_player(chat_id, user_id, money=player["money"] - tile["price"])
+    DB.set_property_owner(chat_id, pos, user_id)
+    DB.update_game(chat_id, last_action=f"✅ {player['name']} {tile['name']} satın aldı.", state="turn", pending_user=None, pending_pos=None)
+
+    nxt = next_turn(chat_id)
+    DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+    schedule_turn_timeout(chat_id, context)
+    await update_panel(chat_id, context)
+
+async def pass_buy(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "buy" or game["pending_user"] != user_id:
+        return
+    pos = game["pending_pos"]
+    DB.update_game(chat_id, state="turn", pending_user=None, pending_pos=None, last_action=f"❌ {config.BOARD[pos]['name']} alınmadı.")
+    nxt = next_turn(chat_id)
+    DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+    schedule_turn_timeout(chat_id, context)
+    await update_panel(chat_id, context)
+
+async def start_auction_from_buy(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "buy" or game["pending_user"] != user_id:
+        return
+    pos = game["pending_pos"]
+    bidders = [p["user_id"] for p in DB.get_players(chat_id) if p["alive"]]
+    DB.start_auction(chat_id, pos, bidders)
+    DB.update_game(chat_id, state="auction", pending_user=None, pending_pos=None, last_action=f"📢 {config.BOARD[pos]['name']} açık artırma başladı!")
+    schedule_auction_timeout(chat_id, context)
+    await update_panel(chat_id, context)
+
+def auction_active_bidders(auc):
+    return [uid for uid in auc["bidders"] if uid not in set(auc["passed"])]
+
+def auction_current_user(auc):
+    active = auction_active_bidders(auc)
+    # current_idx bidders listesinde geziniyor; pas geçmişse ilerle
+    idx = auc["current_idx"]
+    bidders = auc["bidders"]
+    for _ in range(len(bidders) + 1):
+        uid = bidders[idx]
+        if uid in active:
+            return uid, idx
+        idx = (idx + 1) % len(bidders)
+    return None, idx
+
+async def auction_bid(chat_id: int, user_id: int, inc: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "auction":
+        return
+    auc = DB.get_auction(chat_id)
+    if not auc:
+        DB.update_game(chat_id, state="turn", last_action="Açık artırma bulunamadı.")
+        schedule_turn_timeout(chat_id, context)
+        await update_panel(chat_id, context)
+        return
+
+    cur_uid, fixed_idx = auction_current_user(auc)
+    if cur_uid != user_id:
+        return
+
+    pl = DB.get_player(chat_id, user_id)
+    new_bid = auc["highest_bid"] + inc
+    if pl["money"] < new_bid:
+        DB.update_game(chat_id, last_action=f"💸 {pl['name']} bu teklifi veremiyor (gerekli: ${new_bid}).")
+        schedule_auction_timeout(chat_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
+
+    auc["highest_bid"] = new_bid
+    auc["highest_user"] = user_id
+    # sıradaki aktif kişiye geç
+    auc["current_idx"] = (fixed_idx + 1) % len(auc["bidders"])
+    DB.update_auction(chat_id, current_idx=auc["current_idx"], highest_bid=new_bid, highest_user=user_id, passed=auc["passed"])
+    DB.update_game(chat_id, last_action=f"💸 {pl['name']} teklif verdi: ${new_bid}")
+    schedule_auction_timeout(chat_id, context)
+
+    # bitiş kontrol
+    await auction_check_end(chat_id, context)
+    await update_panel(chat_id, context, viewer_id=user_id)
+
+async def auction_pass(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    if not game or game["state"] != "auction":
+        return
+    auc = DB.get_auction(chat_id)
+    if not auc:
+        return
+
+    cur_uid, fixed_idx = auction_current_user(auc)
+    if cur_uid != user_id:
+        return
+
+    if user_id not in auc["passed"]:
+        auc["passed"].append(user_id)
+
+    auc["current_idx"] = (fixed_idx + 1) % len(auc["bidders"])
+    DB.update_auction(chat_id, passed=auc["passed"], current_idx=auc["current_idx"])
+    pl = DB.get_player(chat_id, user_id)
+    DB.update_game(chat_id, last_action=f"⛔ {pl['name']} PAS geçti.")
+    schedule_auction_timeout(chat_id, context)
+
+    await auction_check_end(chat_id, context)
+    await update_panel(chat_id, context, viewer_id=user_id)
+
+async def auction_check_end(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    auc = DB.get_auction(chat_id)
+    if not auc:
+        return
+    active = auction_active_bidders(auc)
+
+    # herkes pas geçtiyse (aktif boşsa)
+    if len(active) == 0:
+        DB.clear_auction(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="❌ Açık artırmada teklif kalmadı, mülk satılmadı.")
+        nxt = next_turn(chat_id)
+        DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    # aktif tek kişi kaldıysa bitir
+    if len(active) == 1:
+        winner_id = active[0]
+        bid = auc["highest_bid"]
+        pos = auc["pos"]
+        tile = config.BOARD[pos]
+
+        if bid <= 0:
+            # kimse teklif vermedi
+            DB.clear_auction(chat_id)
+            DB.update_game(chat_id, state="turn", last_action="❌ Açık artırmada teklif gelmedi, mülk satılmadı.")
+            nxt = next_turn(chat_id)
+            DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+            schedule_turn_timeout(chat_id, context)
+            return
+
+        pl = DB.get_player(chat_id, winner_id)
+        if not pl or pl["money"] < bid:
+            DB.clear_auction(chat_id)
+            DB.update_game(chat_id, state="turn", last_action="💸 Kazananın parası yetmedi, satış iptal.")
+            nxt = next_turn(chat_id)
+            DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+            schedule_turn_timeout(chat_id, context)
+            return
+
+        # ipotekli devri kuralı: (burada mülk boştu, mortgaged yok) ama generic kalsın
+        props = DB.get_properties(chat_id)
+        info = props.get(pos)
+        # satın al
+        DB.update_player(chat_id, winner_id, money=pl["money"] - bid)
+        DB.set_property_owner(chat_id, pos, winner_id)
+
+        DB.clear_auction(chat_id)
+        DB.update_game(chat_id, state="turn", last_action=f"🏁 Açık artırmayı {pl['name']} kazandı! {tile['name']} → ${bid}")
+
+        nxt = next_turn(chat_id)
+        DB.update_game(chat_id, last_action=DB.get_game(chat_id)["last_action"] + f" ➡️ Sıra: {nxt['name']}")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+
+# ----------------- Build / Mortgage -----------------
+
+def can_build_house(chat_id: int, user_id: int, pos: int):
+    tile = config.BOARD[pos]
+    props = DB.get_properties(chat_id)
+    inf = props.get(pos)
     if tile["type"] != "property":
         return False, "Bu mülke ev kurulmaz."
-    if not prop or prop["owner_id"] != user_id:
+    if not inf or inf["owner_id"] != user_id:
         return False, "Bu mülk sana ait değil."
-    if prop["mortgaged"]:
+    if inf["mortgaged"]:
         return False, "İpotekli mülke ev kurulmaz."
-    if not owns_full_set(chat_id, user_id, tile["color"]):
-        return False, "Önce renk setini tamamlamalısın."
-    if prop["hotel"]:
+    if inf["hotel"]:
         return False, "Zaten otel var."
-    if prop["houses"] >= 4:
-        return False, "Önce otel kurman gerekir."
+    if not owns_full_set(chat_id, user_id, tile["color"]):
+        return False, "Renk setini tamamlamalısın."
+    if inf["houses"] >= 4:
+        return False, "Maks 4 ev. Sonraki otel."
     return True, None
 
-def can_build_hotel(chat_id, user_id, position):
-    tile = BOARD[position]
-    props = get_properties(chat_id)
-    prop = props.get(position)
+def can_build_hotel(chat_id: int, user_id: int, pos: int):
+    tile = config.BOARD[pos]
+    props = DB.get_properties(chat_id)
+    inf = props.get(pos)
     if tile["type"] != "property":
         return False, "Bu mülke otel kurulmaz."
-    if not prop or prop["owner_id"] != user_id:
+    if not inf or inf["owner_id"] != user_id:
         return False, "Bu mülk sana ait değil."
-    if prop["mortgaged"]:
+    if inf["mortgaged"]:
         return False, "İpotekli mülke otel kurulmaz."
-    if prop["hotel"]:
+    if inf["hotel"]:
         return False, "Zaten otel var."
-    if prop["houses"] < 4:
-        return False, "Önce 4 ev kurmalısın."
+    if inf["houses"] < 4:
+        return False, "Önce 4 ev kur."
     return True, None
 
-def apply_money(chat_id, user_id, delta):
-    players = get_players(chat_id)
-    player = next((p for p in players if p["user_id"] == user_id), None)
-    if not player:
-        return None, None
-    new_money = player["money"] + delta
-    alive = 1
-    msg = None
-    if new_money < 0:
-        alive = 0
-        msg = f"💀 {player['name']} iflas etti!"
-        delete_properties_of_player(chat_id, user_id)
-    update_player(chat_id, user_id, money=new_money, alive=alive)
-    return new_money, msg
+async def toggle_mortgage(chat_id: int, user_id: int, pos: int, context: ContextTypes.DEFAULT_TYPE):
+    props = DB.get_properties(chat_id)
+    inf = props.get(pos)
+    if not inf or inf["owner_id"] != user_id:
+        DB.update_game(chat_id, last_action="Bu mülk sana ait değil.")
+        return
+    if inf["houses"] > 0 or inf["hotel"]:
+        DB.update_game(chat_id, last_action="Önce ev/otel kaldırılmalı.")
+        return
 
-def main_menu(is_private=False):
-    if is_private:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Beni Gruba Ekle", url=ADD_BOT_URL)],
-            [InlineKeyboardButton("🆘 Destek", url=SUPPORT_URL)],
-            [
-                InlineKeyboardButton("🎮 Yeni Oyun", callback_data="newgame"),
-                InlineKeyboardButton("➕ Katıl", callback_data="join"),
-            ],
-            [
-                InlineKeyboardButton("▶️ Başlat", callback_data="startgame"),
-                InlineKeyboardButton("🎲 Zar At", callback_data="roll"),
-            ],
-            [
-                InlineKeyboardButton("📊 Durum", callback_data="status"),
-                InlineKeyboardButton("🛑 Bitir", callback_data="endgame"),
-            ]
-        ])
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 Yeni Oyun", callback_data="newgame"),
-         InlineKeyboardButton("➕ Katıl", callback_data="join")],
-        [InlineKeyboardButton("▶️ Başlat", callback_data="startgame"),
-         InlineKeyboardButton("🎲 Zar At", callback_data="roll")],
-        [InlineKeyboardButton("📊 Durum", callback_data="status"),
-         InlineKeyboardButton("👥 Oyuncular", callback_data="players")],
-        [InlineKeyboardButton("🏠 Mülklerim", callback_data="myprops"),
-         InlineKeyboardButton("🧱 Geliştir", callback_data="build_menu")],
-        [InlineKeyboardButton("🏦 İpotek", callback_data="mortgage_menu"),
-         InlineKeyboardButton("🤝 Takas", callback_data="trade_menu")],
-        [InlineKeyboardButton("🆘 Destek", url=SUPPORT_URL),
-         InlineKeyboardButton("➕ Beni Gruba Ekle", url=ADD_BOT_URL)],
-        [InlineKeyboardButton("🛑 Bitir", callback_data="endgame")],
-    ])
-
-def buy_menu(position):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Satın Al", callback_data=f"buy_{position}")],
-        [InlineKeyboardButton("📢 Açık Artırma", callback_data=f"auction_{position}")],
-        [InlineKeyboardButton("❌ Geç", callback_data=f"pass_{position}")]
-    ])
-
-def build_menu_for_player(chat_id, user_id):
-    props = get_properties(chat_id)
-    buttons = []
-    for pos, info in props.items():
-        if info["owner_id"] == user_id and BOARD[pos]["type"] == "property":
-            buttons.append([InlineKeyboardButton(f"🧱 {BOARD[pos]['name']}", callback_data=f"propbuild_{pos}")])
-    buttons.append([InlineKeyboardButton("⬅️ Ana Menü", callback_data="back_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def build_actions_menu(position):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Ev Kur", callback_data=f"buildhouse_{position}")],
-        [InlineKeyboardButton("🏨 Otel Kur", callback_data=f"buildhotel_{position}")],
-        [InlineKeyboardButton("⬅️ Geri", callback_data="build_menu")]
-    ])
-
-def mortgage_menu_for_player(chat_id, user_id):
-    props = get_properties(chat_id)
-    buttons = []
-    for pos, info in props.items():
-        if info["owner_id"] == user_id:
-            state = "🔒" if info["mortgaged"] else "💰"
-            buttons.append([InlineKeyboardButton(f"{state} {BOARD[pos]['name']}", callback_data=f"mortgage_{pos}")])
-    buttons.append([InlineKeyboardButton("⬅️ Ana Menü", callback_data="back_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def trade_players_menu(chat_id, user_id):
-    buttons = []
-    for p in get_players(chat_id):
-        if p["user_id"] != user_id and p["alive"]:
-            buttons.append([InlineKeyboardButton(f"🤝 {p['name']}", callback_data=f"tradepick_{p['user_id']}")])
-    buttons.append([InlineKeyboardButton("⬅️ Ana Menü", callback_data="back_main")])
-    return InlineKeyboardMarkup(buttons)
-
-def auction_menu(position):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💸 +10", callback_data=f"bid10_{position}"),
-         InlineKeyboardButton("💸 +50", callback_data=f"bid50_{position}")],
-        [InlineKeyboardButton("✅ Bitir", callback_data=f"finishauction_{position}")],
-        [InlineKeyboardButton("❌ Vazgeç", callback_data="back_main")]
-    ])
-
-def format_status(chat_id):
-    game = get_game(chat_id)
-    players = get_players(chat_id)
-    props = get_properties(chat_id)
-
-    text = "🎲 <b>Oyun Durumu</b>\n\n"
-    for i, p in enumerate(players, start=1):
-        state = "✅" if p["alive"] else "💀"
-        jail = " 🚔" if p["in_jail"] else ""
-        tile_name = BOARD[p["position"]]["name"]
-        turn_mark = " ⬅️" if game and game["started"] and game["turn"] == i - 1 else ""
-        text += f"{i}. <b>{p['name']}</b> | 💰 ${p['money']} | 📍 {tile_name}{jail} | {state}{turn_mark}\n"
-
-    text += "\n🏠 <b>Mülkler</b>\n"
-    if not props:
-        text += "Yok"
+    pl = DB.get_player(chat_id, user_id)
+    mv = mortgage_value(pos)
+    if inf["mortgaged"]:
+        # çöz: %10 faizli geri öde
+        cost = int(mv * 1.1)
+        if pl["money"] < cost:
+            DB.update_game(chat_id, last_action=f"💸 İpotekten çıkarmak için ${cost} lazım.")
+            return
+        DB.update_property(chat_id, pos, mortgaged=0)
+        DB.update_player(chat_id, user_id, money=pl["money"] - cost)
+        DB.update_game(chat_id, last_action=f"🔓 {config.BOARD[pos]['name']} ipotek çözüldü. -${cost}")
     else:
-        for pos, info in props.items():
-            extra = ""
-            if info["mortgaged"]:
-                extra += " | 🔒 İpotek"
-            if info["hotel"]:
-                extra += " | 🏨 Otel"
-            elif info["houses"] > 0:
-                extra += f" | 🏠 {info['houses']} ev"
-            text += f"- {BOARD[pos]['name']} → {owner_name(chat_id, info['owner_id'])}{extra}\n"
-    return text
+        DB.update_property(chat_id, pos, mortgaged=1)
+        DB.update_player(chat_id, user_id, money=pl["money"] + mv)
+        DB.update_game(chat_id, last_action=f"🏦 {config.BOARD[pos]['name']} ipotek edildi. +${mv}")
 
-def format_players(chat_id):
-    players = get_players(chat_id)
-    if not players:
-        return "Oyuncu yok."
-    text = "👥 <b>Oyuncular</b>\n\n"
-    for i, p in enumerate(players, start=1):
-        state = "✅" if p["alive"] else "💀"
-        text += f"{i}. <b>{p['name']}</b> | 💰 ${p['money']} | {state}\n"
-    return text
 
-def format_my_props(chat_id, user_id):
-    props = get_properties(chat_id)
-    my_props = [pos for pos, info in props.items() if info["owner_id"] == user_id]
-    if not my_props:
-        return "🏠 Henüz mülkün yok."
+# ----------------- Trade (gelişmiş) -----------------
 
-    text = "🏠 <b>Mülklerin</b>\n\n"
-    total = 0
-    for pos in my_props:
-        tile = BOARD[pos]
-        info = props[pos]
-        total += tile.get("price", 0)
+# trade_setup bilgisi games.last_action içine değil; basitçe memory değil, trade tablosu + state ile yönetiyoruz.
+# adımlar için geçici seçimleri environment yerine "games.pending_*" kullanacağız: pending_pos = offer, pending_user = target vb.
+# pratikte: state=trade_setup, pending_user=target_id, pending_pos=offer_pos, last_action='TRADE:need_request:cash=...'
+
+def parse_trade_setup(last_action: str):
+    # format: "TRADE|step=offer|offer=1|req=2|cash=10|proposer=...|target=..."
+    if not last_action.startswith("TRADE|"):
+        return None
+    parts = last_action.split("|")[1:]
+    d = {}
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            d[k] = v
+    # normalize
+    for k in ("offer", "req", "cash", "proposer", "target"):
+        if k in d and d[k] != "None":
+            try:
+                d[k] = int(d[k])
+            except:
+                pass
+        elif k in d:
+            d[k] = None
+    return d
+
+def make_trade_setup(step: str, proposer: int, target: int, offer=None, req=None, cash=0):
+    return f"TRADE|step={step}|proposer={proposer}|target={target}|offer={offer}|req={req}|cash={cash}"
+
+async def trade_send(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    game = DB.get_game(chat_id)
+    data = parse_trade_setup(game["last_action"] or "")
+    if not data:
+        DB.update_game(chat_id, last_action="Takas verisi bulunamadı.", state="turn")
+        return
+
+    proposer = data["proposer"]
+    target = data["target"]
+    offer = data["offer"]
+    req = data["req"]
+    cash = data["cash"] or 0
+
+    # doğrula sahiplik
+    props = DB.get_properties(chat_id)
+    if offer not in props or props[offer]["owner_id"] != proposer:
+        DB.update_game(chat_id, last_action="Takas iptal: teklif edilen mülk artık sende değil.", state="turn")
+        return
+    if req not in props or props[req]["owner_id"] != target:
+        DB.update_game(chat_id, last_action="Takas iptal: istenen mülk artık karşı tarafta değil.", state="turn")
+        return
+
+    # binalı mülkleri takasa kapat (sorunsuzluk için)
+    if props[offer]["houses"] or props[offer]["hotel"] or props[req]["houses"] or props[req]["hotel"]:
+        DB.update_game(chat_id, last_action="Takas için iki mülkte de ev/otel olmamalı.", state="turn")
+        return
+
+    DB.create_trade(chat_id, proposer, target, offer, req, cash)
+    DB.update_game(chat_id, state="trade_pending", last_action=f"🤝 Takas teklifi gönderildi: {owner_name(chat_id, proposer)} → {owner_name(chat_id, target)}")
+    schedule_trade_timeout(chat_id, context)
+
+async def trade_apply(chat_id: int, accept: bool, context: ContextTypes.DEFAULT_TYPE):
+    tr = DB.get_trade(chat_id)
+    if not tr:
+        DB.update_game(chat_id, state="turn", last_action="Takas bulunamadı.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    proposer = tr["proposer_id"]
+    target = tr["target_id"]
+    offer = tr["offer_pos"]
+    req = tr["request_pos"]
+    cash = tr["cash_delta"]
+
+    if not accept:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="❌ Takas reddedildi.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    props = DB.get_properties(chat_id)
+    p1 = DB.get_player(chat_id, proposer)
+    p2 = DB.get_player(chat_id, target)
+    if not p1 or not p2:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: oyuncu bulunamadı.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    # sahiplik tekrar kontrol
+    if offer not in props or props[offer]["owner_id"] != proposer:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: teklif edilen mülk artık sende değil.")
+        schedule_turn_timeout(chat_id, context)
+        return
+    if req not in props or props[req]["owner_id"] != target:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: istenen mülk artık karşı tarafta değil.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    # para farkı uygula
+    # cash >0: proposer -> target
+    if cash > 0 and p1["money"] < cash:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: proposer parası yetmedi.")
+        schedule_turn_timeout(chat_id, context)
+        return
+    if cash < 0 and p2["money"] < abs(cash):
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: target parası yetmedi.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    # ipotekli devri kuralı: yeni sahip %10 faiz öder (ödeyemezse iptal)
+    # offer mülkü target'a geçecek
+    # req mülkü proposer'a geçecek
+    extra_cost_target = 0
+    extra_cost_proposer = 0
+    if props[offer]["mortgaged"]:
+        extra_cost_target += mortgage_interest(offer)
+    if props[req]["mortgaged"]:
+        extra_cost_proposer += mortgage_interest(req)
+
+    if p2["money"] < extra_cost_target:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: target ipotek faizi ödeyemedi.")
+        schedule_turn_timeout(chat_id, context)
+        return
+    if p1["money"] < extra_cost_proposer:
+        DB.clear_trade(chat_id)
+        DB.update_game(chat_id, state="turn", last_action="Takas iptal: proposer ipotek faizi ödeyemedi.")
+        schedule_turn_timeout(chat_id, context)
+        return
+
+    # transfer
+    DB.update_property(chat_id, offer, owner_id=target)
+    DB.update_property(chat_id, req, owner_id=proposer)
+
+    # cash
+    if cash > 0:
+        DB.update_player(chat_id, proposer, money=p1["money"] - cash)
+        DB.update_player(chat_id, target, money=p2["money"] + cash)
+        p1 = DB.get_player(chat_id, proposer)
+        p2 = DB.get_player(chat_id, target)
+    elif cash < 0:
+        DB.update_player(chat_id, target, money=p2["money"] - abs(cash))
+        DB.update_player(chat_id, proposer, money=p1["money"] + abs(cash))
+        p1 = DB.get_player(chat_id, proposer)
+        p2 = DB.get_player(chat_id, target)
+
+    # mortgage interest
+    if extra_cost_target:
+        DB.update_player(chat_id, target, money=p2["money"] - extra_cost_target)
+        p2 = DB.get_player(chat_id, target)
+    if extra_cost_proposer:
+        DB.update_player(chat_id, proposer, money=p1["money"] - extra_cost_proposer)
+        p1 = DB.get_player(chat_id, proposer)
+
+    DB.clear_trade(chat_id)
+    DB.update_game(chat_id, state="turn", last_action=(
+        f"✅ Takas tamamlandı!\n"
+        f"• {p1['name']} aldı: {config.BOARD[req]['name']}\n"
+        f"• {p2['name']} aldı: {config.BOARD[offer]['name']}\n"
+        + (f"• Para farkı: {cash}$\n" if cash else "")
+        + (f"• İpotek faizi ödendi: proposer ${extra_cost_proposer}, target ${extra_cost_target}" if (extra_cost_proposer or extra_cost_target) else "")
+    ))
+    schedule_turn_timeout(chat_id, context)
+
+
+# ----------------- Menüler / Listeler -----------------
+
+def format_players(chat_id: int):
+    ps = DB.get_players(chat_id)
+    t = "<b>👥 Oyuncular</b>\n\n"
+    for p in ps:
+        st = "✅" if p["alive"] else "💀"
+        t += f"• <b>{p['name']}</b> | ${p['money']} | {st}\n"
+    return t
+
+def format_my_props(chat_id: int, user_id: int):
+    props = DB.get_properties(chat_id)
+    my = [pos for pos, inf in props.items() if inf["owner_id"] == user_id]
+    if not my:
+        return "🏠 Mülkün yok."
+    t = "<b>🏠 Mülklerin</b>\n\n"
+    for pos in my:
+        inf = props[pos]
         extra = ""
-        if info["mortgaged"]:
-            extra += " | 🔒 İpotekli"
-        if info["hotel"]:
-            extra += " | 🏨 Otel"
-        elif info["houses"] > 0:
-            extra += f" | 🏠 {info['houses']} ev"
-        text += f"- {tile['name']} | Değer: ${tile.get('price', 0)} | Kira: ${calculate_rent(chat_id, pos)}{extra}\n"
-    text += f"\n💎 Toplam portföy: ${total}"
-    return text
+        if inf["mortgaged"]:
+            extra += " 🔒"
+        if inf["hotel"]:
+            extra += " 🏨"
+        elif inf["houses"]:
+            extra += f" 🏠x{inf['houses']}"
+        t += f"• {config.BOARD[pos]['name']} | kira ${calc_rent(chat_id, pos)}{extra}\n"
+    return t
 
-async def send_or_edit(query, text, reply_markup=None):
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    except Exception:
-        await query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+def format_status(chat_id: int):
+    game = DB.get_game(chat_id)
+    ps = DB.get_players(chat_id)
+    props = DB.get_properties(chat_id)
+    cur = get_current_player(chat_id)
+    t = "<b>📊 Durum</b>\n\n"
+    if cur and game and game["started"]:
+        t += f"➡️ Sıra: <b>{cur['name']}</b>\n\n"
+    t += "<b>Oyuncular</b>\n"
+    for p in ps:
+        tile = config.BOARD[p["position"]]["name"]
+        st = "✅" if p["alive"] else "💀"
+        t += f"• {p['name']} | ${p['money']} | {tile} | {st}\n"
+    t += "\n<b>Mülk sayısı:</b> " + str(len(props))
+    return t
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_private = update.effective_chat.type == ChatType.PRIVATE
-    if is_private:
-        text = (
-            "🎩 <b>KGB Monopoly Bot</b>\n\n"
-            "Telegram grubunda arkadaşlarınla Monopoly tarzı oyun oynamak için hazır.\n\n"
-            "Aşağıdan beni grubuna ekleyebilir, destek kanalına gidebilir veya oyun menüsünü kullanabilirsin."
-        )
-    else:
-        text = (
-            "🎮 <b>Oyun Menüsü</b>\n\n"
-            "Aşağıdaki butonlarla oyunu oluşturabilir, katılabilir ve oynayabilirsiniz."
-        )
-    await update.message.reply_text(text, reply_markup=main_menu(is_private=is_private), parse_mode="HTML")
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# ----------------- Handlers -----------------
 
-    chat_id = query.message.chat.id
-    is_private = query.message.chat.type == ChatType.PRIVATE
-    user = query.from_user
-    data = query.data
-    menu = main_menu(is_private=is_private)
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not DB.game_exists(chat_id):
+        DB.create_game(chat_id)
 
-    if data == "back_main":
-        return await send_or_edit(query, "🎮 <b>Ana Menü</b>", menu)
+    await ensure_panel_message(chat_id, context)
+    await update_panel(chat_id, context)
 
-    if data == "newgame":
-        create_game(chat_id)
-        return await send_or_edit(query, "🎮 Yeni oyun oluşturuldu.\nKatılmak için <b>➕ Katıl</b> butonuna basın.", menu)
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
 
-    if data == "join":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Önce yeni oyun oluşturulmalı.", menu)
-        game = get_game(chat_id)
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat_id
+    user_id = q.from_user.id
+
+    if not DB.game_exists(chat_id):
+        DB.create_game(chat_id)
+
+    game = DB.get_game(chat_id)
+
+    data = q.data
+
+    # noop
+    if data == "noop":
+        return
+
+    # help
+    if data == "hp":
+        await q.message.reply_text(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+        return
+
+    # end
+    if data == "en":
+        DB.delete_game(chat_id)
+        await q.message.reply_text("🛑 Oyun kapatıldı. /start ile tekrar açabilirsiniz.")
+        return
+
+    # new game
+    if data == "ng":
+        DB.create_game(chat_id)
+        DB.update_game(chat_id, last_action="Yeni oyun oluşturuldu.")
+        await ensure_panel_message(chat_id, context)
+        await update_panel(chat_id, context)
+        return
+
+    # join
+    if data == "jn":
         if game["started"]:
-            return await send_or_edit(query, "Oyun başladı, artık katılamazsın.", menu)
-        ok = add_player(chat_id, user.id, user.first_name)
-        return await send_or_edit(query, f"✅ {user.first_name} oyuna katıldı." if ok else "Zaten oyundasın.", menu)
+            DB.update_game(chat_id, last_action="Oyun başladı; artık katılamazsın.")
+        else:
+            ok = DB.add_player(chat_id, user_id, q.from_user.first_name, config.START_MONEY)
+            DB.update_game(chat_id, last_action=("✅ Oyuna katıldın." if ok else "Zaten oyundasın."))
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data == "startgame":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Önce yeni oyun oluştur.", menu)
-        players = get_players(chat_id)
-        if len(players) < 2:
-            return await send_or_edit(query, "En az 2 oyuncu gerekli.", menu)
-        update_game(chat_id, started=1, turn=0)
+    # start
+    if data == "st":
+        await start_game(chat_id, context)
+        await update_panel(chat_id, context)
+        return
+
+    # status
+    if data == "ss":
+        await q.message.reply_text(format_status(chat_id), parse_mode="HTML")
+        return
+
+    # players
+    if data == "pl":
+        await q.message.reply_text(format_players(chat_id), parse_mode="HTML")
+        return
+
+    # my props
+    if data == "mp":
+        await q.message.reply_text(format_my_props(chat_id, user_id), parse_mode="HTML")
+        return
+
+    # roll
+    if data == "rl":
+        g = DB.get_game(chat_id)
+        if not g["started"]:
+            DB.update_game(chat_id, last_action="Oyun başlamadı.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        if g["state"] != "turn":
+            DB.update_game(chat_id, last_action="Şu an başka bir işlem var (satın alma/açık artırma/takas).")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
         cur = get_current_player(chat_id)
-        return await send_or_edit(query, f"🚀 Oyun başladı!\nİlk sıra: <b>{cur['name']}</b>", menu)
+        if not cur or cur["user_id"] != user_id:
+            DB.update_game(chat_id, last_action=f"Sıra sende değil. Sıradaki: {cur['name'] if cur else '?'}")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        await do_roll(chat_id, user_id, context, auto=False)
+        return
 
-    if data == "status":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, format_status(chat_id), menu)
+    # buy / pass / auction from buy state
+    if data.startswith("buy:"):
+        pos = int(data.split(":")[1])
+        g = DB.get_game(chat_id)
+        if g["state"] == "buy" and g["pending_user"] == user_id and g["pending_pos"] == pos:
+            await buy_property(chat_id, user_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data == "players":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, format_players(chat_id), menu)
+    if data.startswith("pas:"):
+        pos = int(data.split(":")[1])
+        g = DB.get_game(chat_id)
+        if g["state"] == "buy" and g["pending_user"] == user_id and g["pending_pos"] == pos:
+            await pass_buy(chat_id, user_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data == "myprops":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, format_my_props(chat_id, user.id), menu)
+    if data.startswith("auc:"):
+        pos = int(data.split(":")[1])
+        g = DB.get_game(chat_id)
+        if g["state"] == "buy" and g["pending_user"] == user_id and g["pending_pos"] == pos:
+            await start_auction_from_buy(chat_id, user_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data == "build_menu":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, "🧱 Geliştirmek istediğin mülkü seç:", build_menu_for_player(chat_id, user.id))
+    # auction bid/pass
+    if data.startswith("ab:"):
+        inc = int(data.split(":")[1])
+        await auction_bid(chat_id, user_id, inc, context)
+        return
 
-    if data.startswith("propbuild_"):
-        pos = int(data.split("_")[1])
-        props = get_properties(chat_id)
-        if pos not in props or props[pos]["owner_id"] != user.id:
-            return await send_or_edit(query, "Bu mülk sana ait değil.", menu)
-        tile = BOARD[pos]
-        info = props[pos]
-        text = (
-            f"🏠 <b>{tile['name']}</b>\n"
-            f"Renk: {tile.get('color', '-')}\n"
-            f"Kira: ${calculate_rent(chat_id, pos)}\n"
-            f"Ev: {info['houses']}\n"
-            f"Otel: {'Var' if info['hotel'] else 'Yok'}\n"
-            f"İpotek: {'Var' if info['mortgaged'] else 'Yok'}\n"
-            f"Ev kurma bedeli: ${tile['price'] // 2}\n"
-            f"Otel kurma bedeli: ${tile['price']}"
+    if data == "ap":
+        await auction_pass(chat_id, user_id, context)
+        return
+
+    # build / mortgage / trade only current player & state turn
+    if data == "bd":
+        g = DB.get_game(chat_id)
+        cur = get_current_player(chat_id)
+        if not g["started"] or g["state"] != "turn" or not cur or cur["user_id"] != user_id:
+            DB.update_game(chat_id, last_action="İnşa sadece sıradaki oyuncunun turunda yapılır.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        # menü aç: panelde last_action'a yazıp paneli güncellemek yerine ayrı menü gönderelim
+        await q.message.reply_text("🧱 İnşa menüsü:", reply_markup=kb_build_menu(chat_id, user_id))
+        return
+
+    if data.startswith("bdp:"):
+        pos = int(data.split(":")[1])
+        await q.message.reply_text(
+            f"🏗️ {config.BOARD[pos]['name']} için işlem seç:",
+            reply_markup=kb_build_actions(pos)
         )
-        return await send_or_edit(query, text, build_actions_menu(pos))
+        return
 
-    if data.startswith("buildhouse_"):
-        pos = int(data.split("_")[1])
-        can_build, reason = can_build_house(chat_id, user.id, pos)
-        if not can_build:
-            return await send_or_edit(query, f"❌ {reason}", menu)
-        tile = BOARD[pos]
-        player = next((p for p in get_players(chat_id) if p["user_id"] == user.id), None)
+    if data.startswith("bh:"):
+        pos = int(data.split(":")[1])
+        ok, reason = can_build_house(chat_id, user_id, pos)
+        if not ok:
+            DB.update_game(chat_id, last_action=f"❌ {reason}")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        tile = config.BOARD[pos]
         cost = tile["price"] // 2
-        if player["money"] < cost:
-            return await send_or_edit(query, "💸 Yeterli paran yok.", menu)
-        props = get_properties(chat_id)
-        update_property(chat_id, pos, houses=props[pos]["houses"] + 1)
-        update_player(chat_id, user.id, money=player["money"] - cost)
-        return await send_or_edit(query, f"🏠 {tile['name']} mülküne 1 ev kuruldu.", menu)
+        pl = DB.get_player(chat_id, user_id)
+        if pl["money"] < cost:
+            DB.update_game(chat_id, last_action="💸 Yeterli para yok.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        props = DB.get_properties(chat_id)
+        DB.update_property(chat_id, pos, houses=props[pos]["houses"] + 1)
+        DB.update_player(chat_id, user_id, money=pl["money"] - cost)
+        DB.update_game(chat_id, last_action=f"🏠 {tile['name']} mülküne 1 ev kuruldu. (-${cost})")
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data.startswith("buildhotel_"):
-        pos = int(data.split("_")[1])
-        can_build, reason = can_build_hotel(chat_id, user.id, pos)
-        if not can_build:
-            return await send_or_edit(query, f"❌ {reason}", menu)
-        tile = BOARD[pos]
-        player = next((p for p in get_players(chat_id) if p["user_id"] == user.id), None)
+    if data.startswith("bt:"):
+        pos = int(data.split(":")[1])
+        ok, reason = can_build_hotel(chat_id, user_id, pos)
+        if not ok:
+            DB.update_game(chat_id, last_action=f"❌ {reason}")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        tile = config.BOARD[pos]
         cost = tile["price"]
-        if player["money"] < cost:
-            return await send_or_edit(query, "💸 Yeterli paran yok.", menu)
-        update_property(chat_id, pos, houses=0, hotel=1)
-        update_player(chat_id, user.id, money=player["money"] - cost)
-        return await send_or_edit(query, f"🏨 {tile['name']} mülküne otel kuruldu.", menu)
+        pl = DB.get_player(chat_id, user_id)
+        if pl["money"] < cost:
+            DB.update_game(chat_id, last_action="💸 Yeterli para yok.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        DB.update_property(chat_id, pos, houses=0, hotel=1)
+        DB.update_player(chat_id, user_id, money=pl["money"] - cost)
+        DB.update_game(chat_id, last_action=f"🏨 {tile['name']} mülküne otel kuruldu. (-${cost})")
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-    if data == "mortgage_menu":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, "🏦 İpotek menüsü\nBir mülk seç:", mortgage_menu_for_player(chat_id, user.id))
+    if data == "mg":
+        g = DB.get_game(chat_id)
+        cur = get_current_player(chat_id)
+        if not g["started"] or g["state"] != "turn" or not cur or cur["user_id"] != user_id:
+            DB.update_game(chat_id, last_action="İpotek sadece sıradaki oyuncunun turunda yapılır.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        await q.message.reply_text("🏦 İpotek menüsü:", reply_markup=kb_mortgage_menu(chat_id, user_id))
+        return
 
-    if data.startswith("mortgage_"):
-        pos = int(data.split("_")[1])
-        props = get_properties(chat_id)
-        prop = props.get(pos)
-        if not prop or prop["owner_id"] != user.id:
-            return await send_or_edit(query, "Bu mülk sana ait değil.", menu)
-        tile = BOARD[pos]
-        player = next((p for p in get_players(chat_id) if p["user_id"] == user.id), None)
-        mortgage_value = tile["price"] // 2
+    if data.startswith("mo:"):
+        pos = int(data.split(":")[1])
+        await toggle_mortgage(chat_id, user_id, pos, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-        if prop["mortgaged"]:
-            redeem_cost = int(mortgage_value * 1.1)
-            if player["money"] < redeem_cost:
-                return await send_or_edit(query, f"💸 İpotekten çıkarmak için ${redeem_cost} gerekir.", menu)
-            update_property(chat_id, pos, mortgaged=0)
-            update_player(chat_id, user.id, money=player["money"] - redeem_cost)
-            return await send_or_edit(query, f"🔓 {tile['name']} ipotekten çıkarıldı. -${redeem_cost}", menu)
-        else:
-            if prop["houses"] > 0 or prop["hotel"] > 0:
-                return await send_or_edit(query, "Önce ev/otel kaldırılmalı.", menu)
-            update_property(chat_id, pos, mortgaged=1)
-            update_player(chat_id, user.id, money=player["money"] + mortgage_value)
-            return await send_or_edit(query, f"🏦 {tile['name']} ipotek edildi. +${mortgage_value}", menu)
+    # trade flow (sadece current player, state turn, zar atmadan önce)
+    if data == "tr":
+        g = DB.get_game(chat_id)
+        cur = get_current_player(chat_id)
+        if not g["started"] or g["state"] != "turn" or not cur or cur["user_id"] != user_id:
+            DB.update_game(chat_id, last_action="Takas sadece sıradaki oyuncunun turunda (zar atmadan önce) yapılır.")
+            await update_panel(chat_id, context, viewer_id=user_id)
+            return
+        # trade setup başlat: panelde last_action'a setup göm
+        DB.update_game(chat_id, last_action=make_trade_setup("pick", proposer=user_id, target=None, offer=None, req=None, cash=0))
+        await q.message.reply_text("🤝 Takas yapmak istediğin oyuncuyu seç:", reply_markup=kb_trade_pick(chat_id, user_id))
+        return
 
-    if data == "trade_menu":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        return await send_or_edit(query, "🤝 Takas yapmak istediğin oyuncuyu seç:", trade_players_menu(chat_id, user.id))
+    if data.startswith("trt:"):
+        target_id = int(data.split(":")[1])
+        game = DB.get_game(chat_id)
+        dct = parse_trade_setup(game["last_action"] or "")
+        if not dct or dct.get("proposer") != user_id:
+            return
+        DB.update_game(chat_id, last_action=make_trade_setup("offer", proposer=user_id, target=target_id, offer=None, req=None, cash=0))
+        await q.message.reply_text("Takas: vereceğin mülkü seç:", reply_markup=kb_trade_choose_props(chat_id, user_id, target_id, "offer"))
+        return
 
-    if data.startswith("tradepick_"):
-        target_id = int(data.split("_")[1])
-        my_props = [pos for pos, info in get_properties(chat_id).items() if info["owner_id"] == user.id]
-        target_props = [pos for pos, info in get_properties(chat_id).items() if info["owner_id"] == target_id]
+    if data.startswith("tro:"):
+        offer_pos = int(data.split(":")[1])
+        game = DB.get_game(chat_id)
+        dct = parse_trade_setup(game["last_action"] or "")
+        if not dct or dct.get("proposer") != user_id:
+            return
+        target_id = dct["target"]
+        DB.update_game(chat_id, last_action=make_trade_setup("req", proposer=user_id, target=target_id, offer=offer_pos, req=None, cash=dct.get("cash", 0) or 0))
+        await q.message.reply_text("Takas: istediğin mülkü seç:", reply_markup=kb_trade_choose_props(chat_id, user_id, target_id, "req"))
+        return
 
-        if not my_props and not target_props:
-            return await send_or_edit(query, "Takas için yeterli mülk yok.", menu)
-
-        # Basit takas: ilk mülkleri karşılıklı değiştir
-        if my_props and target_props:
-            my_pos = my_props[0]
-            target_pos = target_props[0]
-            update_property(chat_id, my_pos, owner_id=target_id)
-            update_property(chat_id, target_pos, owner_id=user.id)
-            return await send_or_edit(
-                query,
-                f"🤝 Takas gerçekleşti!\n"
-                f"Sen verdin: {BOARD[my_pos]['name']}\n"
-                f"Sen aldın: {BOARD[target_pos]['name']}",
-                menu
-            )
-        return await send_or_edit(query, "Takas için iki tarafta da en az 1 mülk olmalı.", menu)
-
-    if data == "endgame":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        delete_game(chat_id)
-        return await send_or_edit(query, "🛑 Oyun bitirildi.", menu)
-
-    if data == "roll":
-        if not game_exists(chat_id):
-            return await send_or_edit(query, "Aktif oyun yok.", menu)
-        game = get_game(chat_id)
-        if not game["started"]:
-            return await send_or_edit(query, "Oyun başlamadı.", menu)
-
-        current = get_current_player(chat_id)
-        if not current:
-            return await send_or_edit(query, "Oyuncu bulunamadı.", menu)
-        if current["user_id"] != user.id:
-            return await send_or_edit(query, f"⏳ Sıra sende değil.\nSıradaki oyuncu: <b>{current['name']}</b>", menu)
-
-        if current["in_jail"]:
-            jail_turns = current["jail_turns"] + 1
-            if jail_turns >= 2:
-                update_player(chat_id, user.id, in_jail=0, jail_turns=0)
-                jail_text = "🔓 Hapisten çıktın.\n"
-            else:
-                update_player(chat_id, user.id, jail_turns=jail_turns)
-                nxt = next_turn(chat_id)
-                return await send_or_edit(query, f"🚔 Hapistesin, bu turu kaçırdın.\n➡️ Sıradaki: <b>{nxt['name']}</b>", menu)
-        else:
-            jail_text = ""
-
-        d1 = random.randint(1, 6)
-        d2 = random.randint(1, 6)
-        total = d1 + d2
-        is_double = d1 == d2
-        doubles_count = current["doubles_count"] + 1 if is_double else 0
-
-        if doubles_count >= 3:
-            update_player(chat_id, user.id, position=JAIL_POS, in_jail=1, jail_turns=0, doubles_count=0)
-            nxt = next_turn(chat_id)
-            return await send_or_edit(
-                query,
-                f"🎲 {current['name']} {d1}+{d2} attı.\n😵 3 kez çift zar!\n🚓 Hapse gönderildin.\n➡️ Sıradaki: <b>{nxt['name']}</b>",
-                menu
-            )
-
-        old_pos = current["position"]
-        new_pos = (old_pos + total) % len(BOARD)
-        money = current["money"]
-        text = f"{jail_text}🎲 <b>{current['name']}</b> zar attı: {d1} + {d2} = <b>{total}</b>\n"
-
-        if new_pos < old_pos:
-            money += GO_BONUS
-            text += f"🏁 Başlangıçtan geçtin, +${GO_BONUS}\n"
-
-        tile = BOARD[new_pos]
-        text += f"📍 <b>{tile['name']}</b> karesine geldin.\n"
-        update_player(chat_id, user.id, position=new_pos, money=money, doubles_count=doubles_count)
-
-        props = get_properties(chat_id)
-
-        if tile["type"] in ["property", "railroad", "utility"]:
-            info = props.get(new_pos)
-            if info is None:
-                if money >= tile["price"]:
-                    update_game(chat_id, waiting_buy_user=user.id, waiting_buy_pos=new_pos)
-                    return await send_or_edit(
-                        query,
-                        text + f"🏠 Bu alan boş.\nFiyat: <b>${tile['price']}</b>\nNe yapmak istersin?",
-                        buy_menu(new_pos)
-                    )
-                else:
-                    text += "💸 Satın alacak kadar paran yok.\n"
-            elif info["owner_id"] != user.id:
-                rent = calculate_rent(chat_id, new_pos)
-                owner = next((p for p in get_players(chat_id) if p["user_id"] == info["owner_id"]), None)
-                _, bankrupt_msg = apply_money(chat_id, user.id, -rent)
-                if owner and owner["alive"]:
-                    apply_money(chat_id, owner["user_id"], rent)
-                text += f"💰 {owner['name']} oyuncusuna <b>${rent}</b> kira ödendi.\n"
-                if bankrupt_msg:
-                    text += bankrupt_msg + "\n"
-            else:
-                text += "🏡 Kendi mülküne geldin.\n"
-
-        elif tile["type"] == "tax":
-            _, bankrupt_msg = apply_money(chat_id, user.id, -tile["amount"])
-            text += f"🧾 Vergi ödedin: -${tile['amount']}\n"
-            if bankrupt_msg:
-                text += bankrupt_msg + "\n"
-
-        elif tile["type"] == "chance":
-            card_text, delta = random.choice(CHANCE_CARDS)
-            _, bankrupt_msg = apply_money(chat_id, user.id, delta)
-            text += f"🎴 Şans: {card_text} ({'+' if delta >= 0 else '-'}${abs(delta)})\n"
-            if bankrupt_msg:
-                text += bankrupt_msg + "\n"
-
-        elif tile["type"] == "community":
-            card_text, delta = random.choice(COMMUNITY_CARDS)
-            _, bankrupt_msg = apply_money(chat_id, user.id, delta)
-            text += f"📦 Kasa: {card_text} ({'+' if delta >= 0 else '-'}${abs(delta)})\n"
-            if bankrupt_msg:
-                text += bankrupt_msg + "\n"
-
-        elif tile["type"] == "goto_jail":
-            update_player(chat_id, user.id, position=JAIL_POS, in_jail=1, jail_turns=0, doubles_count=0)
-            text += "🚓 Hapise gönderildin!\n"
-
-        elif tile["type"] == "free":
-            text += "🅿️ Ücretsiz park. Dinlen.\n"
-
-        elif tile["type"] == "jail":
-            text += "👮 Sadece hapis ziyareti.\n"
-
-        alive_players = [p for p in get_players(chat_id) if p["alive"]]
-        if len(alive_players) == 1:
-            winner = alive_players[0]
-            delete_game(chat_id)
-            return await send_or_edit(query, text + f"\n🏆 Kazanan: <b>{winner['name']}</b>", menu)
-
-        if is_double and any(p["user_id"] == user.id and p["alive"] for p in get_players(chat_id)):
-            text += "\n✨ Çift zar geldi, tekrar oynayabilirsin!"
-            return await send_or_edit(query, text, menu)
-
-        nxt = next_turn(chat_id)
-        text += f"\n➡️ Sıradaki oyuncu: <b>{nxt['name']}</b>"
-        return await send_or_edit(query, text, menu)
-
-    if data.startswith("buy_"):
-        pos = int(data.split("_")[1])
-        game = get_game(chat_id)
-        if not game or game["waiting_buy_user"] != user.id or game["waiting_buy_pos"] != pos:
-            return await send_or_edit(query, "Bu satın alma hakkı sende değil.", menu)
-
-        player = next((p for p in get_players(chat_id) if p["user_id"] == user.id), None)
-        tile = BOARD[pos]
-
-        if not player or player["money"] < tile["price"]:
-            update_game(chat_id, waiting_buy_user=None, waiting_buy_pos=None)
-            nxt = next_turn(chat_id)
-            return await send_or_edit(query, f"💸 Yetersiz para.\n➡️ Sıradaki: <b>{nxt['name']}</b>", menu)
-
-        update_player(chat_id, user.id, money=player["money"] - tile["price"])
-        set_property_owner(chat_id, pos, user.id)
-        update_game(chat_id, waiting_buy_user=None, waiting_buy_pos=None)
-
-        nxt = next_turn(chat_id)
-        return await send_or_edit(
-            query,
-            f"✅ <b>{player['name']}</b> {tile['name']} mülkünü satın aldı.\n➡️ Sıradaki: <b>{nxt['name']}</b>",
-            menu
+    if data.startswith("trr:"):
+        req_pos = int(data.split(":")[1])
+        game = DB.get_game(chat_id)
+        dct = parse_trade_setup(game["last_action"] or "")
+        if not dct or dct.get("proposer") != user_id:
+            return
+        target_id = dct["target"]
+        offer_pos = dct["offer"]
+        cash = dct.get("cash", 0) or 0
+        DB.update_game(chat_id, last_action=make_trade_setup("confirm", proposer=user_id, target=target_id, offer=offer_pos, req=req_pos, cash=cash))
+        await q.message.reply_text(
+            "Takas: para farkı ayarla (opsiyonel) ve gönder:",
+            reply_markup=kb_trade_choose_props(chat_id, user_id, target_id, "req", selected_offer=offer_pos, selected_req=req_pos, cash_delta=cash)
         )
+        return
 
-    if data.startswith("auction_"):
-        pos = int(data.split("_")[1])
-        game = get_game(chat_id)
-        if not game or game["waiting_buy_user"] != user.id or game["waiting_buy_pos"] != pos:
-            return await send_or_edit(query, "Açık artırma başlatılamadı.", menu)
-        update_game(
-            chat_id,
-            waiting_buy_user=None,
-            waiting_buy_pos=None,
-            auction_pos=pos,
-            auction_turn_user=user.id,
-            auction_highest_bid=0,
-            auction_highest_user=None
+    if data.startswith("trc:"):
+        delta = int(data.split(":")[1])
+        game = DB.get_game(chat_id)
+        dct = parse_trade_setup(game["last_action"] or "")
+        if not dct or dct.get("proposer") != user_id:
+            return
+        cash = (dct.get("cash", 0) or 0) + delta
+        DB.update_game(chat_id, last_action=make_trade_setup("confirm", proposer=dct["proposer"], target=dct["target"], offer=dct["offer"], req=dct["req"], cash=cash))
+        await q.message.reply_text(
+            f"Para farkı güncellendi: Δ={cash}$",
+            reply_markup=kb_trade_choose_props(chat_id, user_id, dct["target"], "req", selected_offer=dct["offer"], selected_req=dct["req"], cash_delta=cash)
         )
-        return await send_or_edit(
-            query,
-            f"📢 <b>{BOARD[pos]['name']}</b> için açık artırma başladı!\nEn yüksek teklif: $0",
-            auction_menu(pos)
-        )
+        return
 
-    if data.startswith("bid10_") or data.startswith("bid50_"):
-        parts = data.split("_")
-        amount = 10 if parts[0] == "bid10" else 50
-        pos = int(parts[1])
+    if data == "tr_send":
+        game = DB.get_game(chat_id)
+        dct = parse_trade_setup(game["last_action"] or "")
+        if not dct or dct.get("proposer") != user_id:
+            return
+        await trade_send(chat_id, context)
+        await update_panel(chat_id, context)
+        return
 
-        game = get_game(chat_id)
-        if not game or game["auction_pos"] != pos:
-            return await send_or_edit(query, "Aktif açık artırma yok.", menu)
+    if data == "tr_cancel":
+        DB.update_game(chat_id, last_action="Takas iptal.", state="turn")
+        schedule_turn_timeout(chat_id, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-        player = next((p for p in get_players(chat_id) if p["user_id"] == user.id and p["alive"]), None)
-        if not player:
-            return await send_or_edit(query, "Oyuncu bulunamadı.", menu)
+    if data == "tr_yes":
+        game = DB.get_game(chat_id)
+        tr = DB.get_trade(chat_id)
+        if not tr or game["state"] != "trade_pending" or tr["target_id"] != user_id:
+            return
+        await trade_apply(chat_id, True, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-        new_bid = game["auction_highest_bid"] + amount
-        if player["money"] < new_bid:
-            return await send_or_edit(query, "💸 Bu teklifi verecek kadar paran yok.", auction_menu(pos))
+    if data == "tr_no":
+        game = DB.get_game(chat_id)
+        tr = DB.get_trade(chat_id)
+        if not tr or game["state"] != "trade_pending" or tr["target_id"] != user_id:
+            return
+        await trade_apply(chat_id, False, context)
+        await update_panel(chat_id, context, viewer_id=user_id)
+        return
 
-        update_game(chat_id, auction_highest_bid=new_bid, auction_highest_user=user.id)
-        return await send_or_edit(
-            query,
-            f"📢 <b>{BOARD[pos]['name']}</b> açık artırması\n\nEn yüksek teklif: <b>${new_bid}</b>\nLider: <b>{player['name']}</b>",
-            auction_menu(pos)
-        )
+    if data == "back_turn":
+        # sadece bilgi
+        return
 
-    if data.startswith("finishauction_"):
-        pos = int(data.split("_")[1])
-        game = get_game(chat_id)
-        if not game or game["auction_pos"] != pos:
-            return await send_or_edit(query, "Aktif açık artırma yok.", menu)
+    # fallback
+    DB.update_game(chat_id, last_action="Bilinmeyen buton.")
+    await update_panel(chat_id, context, viewer_id=user_id)
 
-        winner_id = game["auction_highest_user"]
-        bid = game["auction_highest_bid"]
-
-        if not winner_id:
-            update_game(chat_id, auction_pos=None, auction_turn_user=None, auction_highest_bid=0, auction_highest_user=None)
-            nxt = next_turn(chat_id)
-            return await send_or_edit(query, f"❌ Teklif gelmedi.\n➡️ Sıradaki: <b>{nxt['name']}</b>", menu)
-
-        player = next((p for p in get_players(chat_id) if p["user_id"] == winner_id), None)
-        if not player or player["money"] < bid:
-            update_game(chat_id, auction_pos=None, auction_turn_user=None, auction_highest_bid=0, auction_highest_user=None)
-            nxt = next_turn(chat_id)
-            return await send_or_edit(query, f"💸 Kazananın parası yetmedi.\n➡️ Sıradaki: <b>{nxt['name']}</b>", menu)
-
-        update_player(chat_id, winner_id, money=player["money"] - bid)
-        set_property_owner(chat_id, pos, winner_id)
-        update_game(chat_id, auction_pos=None, auction_turn_user=None, auction_highest_bid=0, auction_highest_user=None)
-
-        nxt = next_turn(chat_id)
-        return await send_or_edit(
-            query,
-            f"🏁 Açık artırmayı <b>{player['name']}</b> kazandı!\nMülk: {BOARD[pos]['name']}\nÖdenen: <b>${bid}</b>\n➡️ Sıradaki: <b>{nxt['name']}</b>",
-            menu
-        )
-
-    if data.startswith("pass_"):
-        pos = int(data.split("_")[1])
-        game = get_game(chat_id)
-        if not game or game["waiting_buy_user"] != user.id or game["waiting_buy_pos"] != pos:
-            return await send_or_edit(query, "Bu işlem sana ait değil.", menu)
-        update_game(chat_id, waiting_buy_user=None, waiting_buy_pos=None)
-        nxt = next_turn(chat_id)
-        return await send_or_edit(query, f"❌ {BOARD[pos]['name']} satın alınmadı.\n➡️ Sıradaki: <b>{nxt['name']}</b>", menu)
 
 def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN eksik.")
-    init_db()
+        raise ValueError("BOT_TOKEN environment variable eksik.")
+
+    DB.init_db()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("Monopoly Bot V4 çalışıyor...")
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    print("KGB Monopoly FINAL (V5) running...")
     app.run_polling()
 
 if __name__ == "__main__":
