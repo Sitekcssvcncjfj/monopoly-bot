@@ -81,7 +81,7 @@ def render_board_png(board, players, size=1000):
 
     d.rounded_rectangle((inner_start, inner_start, inner_end, inner_end), radius=25, fill=(230, 238, 255), outline=(120, 120, 120), width=3)
     d.text((inner_start + 80, inner_start + 60), "KGB MONOPOLY", fill=(20, 20, 20), font=title_font)
-    d.text((inner_start + 100, inner_start + 110), "Canlı Oyun Paneli", fill=(50, 50, 50), font=font)
+    d.text((inner_start + 100, inner_start + 110), "Canli Oyun Paneli", fill=(50, 50, 50), font=font)
 
     per_tile = {}
     for p in players:
